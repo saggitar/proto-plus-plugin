@@ -1,1 +1,1 @@
-Utility package with shared code for distutils extensions.
+Plugin to generate proto-plus classes with protoc compiler.
