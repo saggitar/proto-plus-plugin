@@ -144,9 +144,11 @@ class PkgWriter(object):
         self,
         fd: d.FileDescriptorProto,
         descriptors: Descriptors,
+        readable_imports: bool = False
     ) -> None:
         self.fd = fd
         self.descriptors = descriptors
+        self.readable_imports = readable_imports
         self.lines: List[str] = []
         self.indent = ""
 
@@ -166,8 +168,12 @@ class PkgWriter(object):
         eg. self._import("typing", "Optional") -> "Optional"
         """
         imp = path.replace("/", ".")
-        self.from_imports[imp].add((name, None))
-        return name
+        if self.readable_imports:
+            self.from_imports[imp].add((name, None))
+            return name
+        else:
+            self.imports.add(imp)
+            return imp + "." + name
 
     def _import_message(self, name: str) -> str:
         """Import a referenced message and return a handle"""
@@ -189,7 +195,7 @@ class PkgWriter(object):
                 split[i] = "_r_" + part
         name = ".".join(split)
 
-        # Message defined in this file. Note: GRPC stubs in same .proto are generated into separate files
+        # Message defined in this file.
         if message_fd.name == self.fd.name:
             return name
 
@@ -285,7 +291,6 @@ class PkgWriter(object):
     def write_enum_values(
         self,
         values: Iterable[Tuple[int, d.EnumValueDescriptorProto]],
-        value_type: str,
         scl_prefix: SourceCodeLocation,
     ) -> None:
         for i, val in values:
@@ -313,7 +318,6 @@ class PkgWriter(object):
             class_name = (
                 enum.name if enum.name not in PYTHON_RESERVED else "_r_" + enum.name
             )
-            value_type_fq = prefix + class_name + ".ValueType"
             enum_helper_class = self._import('proto', 'Enum')
 
             l(f"class {class_name}({enum_helper_class}):")
@@ -322,7 +326,6 @@ class PkgWriter(object):
                 self._write_comments(scl)
                 self.write_enum_values(
                     enumerate(enum.value),
-                    value_type_fq,
                     scl + [d.EnumDescriptorProto.VALUE_FIELD_NUMBER],
                     )
             l("")
@@ -376,6 +379,7 @@ class PkgWriter(object):
                     if field.name in PYTHON_RESERVED:
                         continue
                     field_class, field_type = self.protoplus_type(field)
+                    field_type = field_type.removeprefix(f"{class_name}.")
                     l(f"{field.name} = {field_class}({field_type}, number={idx})")
 
                 self.write_extensions(
@@ -405,23 +409,11 @@ class PkgWriter(object):
             self._write_comments(scl)
             l("")
 
-    def _import_casttype(self, casttype: str) -> str:
-        split = casttype.split(".")
-        assert (
-            len(split) == 2
-        ), "mypy_protobuf.[casttype,keytype,valuetype] is expected to be of format path/to/file.TypeInFile"
-        pkg = split[0].replace("/", ".")
-        return self._import(pkg, split[1])
-
     def protoplus_type(
         self, field: d.FieldDescriptorProto
     ) -> tuple:
         """
-        generic_container
-          if set, type the field with generic interfaces. Eg.
-          - Iterable[int] rather than RepeatedScalarFieldContainer[int]
-          - Mapping[k, v] rather than MessageMap[k, v]
-          Can be useful for input types (eg constructor)
+        Generate imports and return correct type
         """
 
         mapping: Dict[d.FieldDescriptorProto.Type.V, Callable[[], str]] = {
@@ -509,12 +501,14 @@ def is_scalar(fd: d.FieldDescriptorProto) -> bool:
 def generate_proto_plus(
     descriptors: Descriptors,
     response: plugin_pb2.CodeGeneratorResponse,
+    readable_imports: bool,
     quiet: bool,
 ) -> None:
     for name, fd in descriptors.to_generate.items():
         pkg_writer = PkgWriter(
             fd,
             descriptors,
+            readable_imports=readable_imports
         )
 
         pkg_writer.write_module_attributes()
@@ -579,6 +573,7 @@ def main() -> None:
         generate_proto_plus(
             Descriptors(request),
             response,
+            "readable_imports" in request.parameter,
             "quiet" in request.parameter,
         )
 
