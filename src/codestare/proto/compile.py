@@ -35,7 +35,7 @@ SourceCodeLocation = List[int]
 # So phabricator doesn't think mypy_protobuf.py is generated
 GENERATED = "@ge" + "nerated"
 HEADER = f"""\"\"\"
-{GENERATED} by mypy-protobuf.  Do not edit manually!
+{GENERATED} by codestare-proto-plus.  Do not edit manually!
 isort:skip_file
 \"\"\"
 """
@@ -380,7 +380,7 @@ class PkgWriter(object):
                         continue
                     field_class, field_type = self.protoplus_type(field)
                     field_type = field_type.removeprefix(f"{class_name}.")
-                    l(f"{field.name} = {field_class}({field_type}, number={idx})")
+                    l(f"{field.name} = {field_class}({field_type}, number={idx + 1})")
 
                 self.write_extensions(
                     desc.extension, scl + [d.DescriptorProto.EXTENSION_FIELD_NUMBER]
