@@ -1,11 +1,11 @@
 #!/usr/bin/env python
 """Protoc Plugin to generate protoplus files. Loosely based on mypy's mypy-protobuf implementation"""
+import importlib.metadata
 import os
 
 import sys
 from collections import defaultdict
 from contextlib import contextmanager
-from functools import wraps
 from pathlib import Path
 from typing import (
     Any,
@@ -20,19 +20,23 @@ from typing import (
     Tuple,
 )
 from warnings import warn
-
+from importlib.metadata import version
 import google.protobuf.descriptor_pb2 as d
 from google.protobuf.compiler import plugin_pb2 as plugin_pb2
 from google.protobuf.internal.containers import RepeatedCompositeFieldContainer
 from google.protobuf.internal.well_known_types import WKTBASES
 
-__version__ = "3.0.0"
+__dist__ = 'codestare-proto-plus'
+try:
+    __version__ = version(__dist__)
+except importlib.metadata.PackageNotFoundError:
+    print(f"Distribution {__dist__} is not installed.")
 
 # SourceCodeLocation is defined by `message Location` here
 # https://github.com/protocolbuffers/protobuf/blob/master/src/google/protobuf/descriptor.proto
 SourceCodeLocation = List[int]
 
-# So phabricator doesn't think mypy_protobuf.py is generated
+# So phabricator doesn't think codestare-proto-plus.py is generated
 GENERATED = "@ge" + "nerated"
 HEADER = f"""\"\"\"
 {GENERATED} by codestare-proto-plus.  Do not edit manually!
@@ -305,7 +309,7 @@ class PkgWriter(object):
                 self._write_line("")  # Extra newline to separate
 
     def write_module_attributes(self) -> None:
-        pass
+        self._write_line("")  # new line after imports
 
     def write_enums(
         self,
@@ -379,12 +383,26 @@ class PkgWriter(object):
                     if field.name in PYTHON_RESERVED:
                         continue
                     field_class, field_type = self.protoplus_type(field)
-                    field_type = field_type.removeprefix(f"{class_name}.")
-                    l(f"{field.name} = {field_class}({field_type}, number={idx + 1})")
+                    args = {
+                        'number': idx + 1,
+                    }
+                    if field.HasField('oneof_index'):
+                        args['oneof'] = f"'{desc.oneof_decl[field.oneof_index].name}'"
+                    else:
+                        args['optional']: field.label == field.LABEL_OPTIONAL
+
+                    # write field specification
+                    l(f"{field.name} = {field_class}(")
+                    with self._indent():
+                        l(f'{field_type.removeprefix(f"{class_name}.")},')
+                        for k, v in args.items():
+                            l(f"{k}={v},")
+                    l(")")
 
                 self.write_extensions(
                     desc.extension, scl + [d.DescriptorProto.EXTENSION_FIELD_NUMBER]
                 )
+            l("")
             l("")
 
     def write_extensions(
@@ -539,7 +557,7 @@ def code_generation() -> Iterator[
     Tuple[plugin_pb2.CodeGeneratorRequest, plugin_pb2.CodeGeneratorResponse],
 ]:
     if len(sys.argv) > 1 and sys.argv[1] in ("-V", "--version"):
-        print("mypy-protobuf " + __version__)
+        print("codestare-proto-plus " + __version__)
         sys.exit(0)
 
     # Read request message from stdin
@@ -569,6 +587,15 @@ def code_generation() -> Iterator[
 def main() -> None:
     # Generate protoplus
     with code_generation() as (request, response):
+        out_redirect = Path('.dump_protoc_out')
+        if out_redirect.exists():
+            import google.protobuf.json_format
+            outfile = Path(out_redirect.read_text().strip())
+            with outfile.open('wb') as out:
+                out.write(request.SerializeToString(deterministic=True))
+            with (outfile.parent / f"{outfile.stem}.json").open('w') as json:
+                json.write(google.protobuf.json_format.MessageToJson(request))
+            sys.exit(0)
 
         generate_proto_plus(
             Descriptors(request),
