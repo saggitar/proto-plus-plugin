@@ -309,6 +309,8 @@ class PkgWriter(object):
                 self._write_line("")  # Extra newline to separate
 
     def write_module_attributes(self) -> None:
+        self.imports.add('proto')
+        self._write_line(f"__protobuf__ = proto")
         self._write_line("")  # new line after imports
 
     def write_enums(
@@ -477,7 +479,7 @@ class PkgWriter(object):
             reexport_file = self.fd.dependency[reexport_idx]
             reexport_fd = self.descriptors.files[reexport_file]
             reexport_imp = (
-                reexport_file[:-6].replace("-", "_").replace("/", ".") + "_pb2"
+                reexport_file[:-6].replace("-", "_").replace("/", ".") + "_pb_plus"
             )
             names = (
                 [m.name for m in reexport_fd.message_type]
@@ -541,6 +543,7 @@ def generate_proto_plus(
         )
         if fd.options.py_generic_services:
             warn("GRPC compilation not implemented.")
+            sys.exit(1)
 
         assert name == fd.name
         assert fd.name.endswith(".proto")
