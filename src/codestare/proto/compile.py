@@ -1,11 +1,13 @@
 #!/usr/bin/env python
 """Protoc Plugin to generate protoplus files. Loosely based on mypy's mypy-protobuf implementation"""
 import importlib.metadata
-import os
-
+import re
+import os.path as op
 import sys
+from abc import abstractmethod
 from collections import defaultdict
 from contextlib import contextmanager
+from itertools import groupby, chain
 from pathlib import Path
 from typing import (
     Any,
@@ -16,10 +18,8 @@ from typing import (
     List,
     Optional,
     Set,
-    Sequence,
     Tuple,
 )
-from warnings import warn
 from importlib.metadata import version
 import google.protobuf.descriptor_pb2 as d
 from google.protobuf.compiler import plugin_pb2 as plugin_pb2
@@ -141,14 +141,12 @@ class Descriptors(object):
             _add_enums(fd.enum_type, start_prefix, fd)
 
 
-class PkgWriter(object):
-    """Writes a single pyi file"""
-
+class Writer(object):
     def __init__(
-        self,
-        fd: d.FileDescriptorProto,
-        descriptors: Descriptors,
-        readable_imports: bool = False
+            self,
+            fd: d.FileDescriptorProto,
+            descriptors: Descriptors,
+            readable_imports: bool = False,
     ) -> None:
         self.fd = fd
         self.descriptors = descriptors
@@ -162,11 +160,6 @@ class PkgWriter(object):
         # if {z} is None, then it shortens to `from {x} import {y}`
         self.from_imports: Dict[str, Set[Tuple[str, Optional[str]]]] = defaultdict(set)
 
-        # Comments
-        self.source_code_info_by_scl = {
-            tuple(location.path): location for location in fd.source_code_info.location
-        }
-
     def _import(self, path: str, name: str) -> str:
         """Imports a stdlib path and returns a handle to it
         eg. self._import("typing", "Optional") -> "Optional"
@@ -178,6 +171,50 @@ class PkgWriter(object):
         else:
             self.imports.add(imp)
             return imp + "." + name
+
+    def _builtin(self, name: str) -> str:
+        return self._import("builtins", name)
+
+    @contextmanager
+    def _indent(self) -> Iterator[None]:
+        self.indent = self.indent + "    "
+        yield
+        self.indent = self.indent[:-4]
+
+    def _write_line(self, line: str, *args: Any) -> None:
+        if args:
+            line = line.format(*args)
+        if line == "":
+            self.lines.append(line)
+        else:
+            self.lines.append(self.indent + line)
+
+    def _break_text(self, text_block: str) -> List[str]:
+        if text_block == "":
+            return []
+        return [
+            l[1:] if l.startswith(" ") else l for l in text_block.rstrip().split("\n")
+        ]
+
+    @abstractmethod
+    def write_module_attributes(self) -> None: ...
+
+    def write(self) -> str:
+        import_lines = []
+        for pkg in sorted(self.imports):
+            import_lines.append(f"import {pkg}")
+
+        for pkg, items in sorted(self.from_imports.items()):
+            import_lines.append(f"from {pkg} import (")
+            for (name, reexport_name) in sorted(items):
+                if reexport_name is None:
+                    import_lines.append(f"    {name},")
+                else:
+                    import_lines.append(f"    {name} as {reexport_name},")
+            import_lines.append(")\n")
+        import_lines.append("")
+
+        return "\n".join(import_lines + self.lines)
 
     def _import_message(self, name: str) -> str:
         """Import a referenced message and return a handle"""
@@ -218,29 +255,22 @@ class PkgWriter(object):
         # from another package.
         return import_name + "." + remains
 
-    def _builtin(self, name: str) -> str:
-        return self._import("builtins", name)
 
-    @contextmanager
-    def _indent(self) -> Iterator[None]:
-        self.indent = self.indent + "    "
-        yield
-        self.indent = self.indent[:-4]
+class PkgWriter(Writer):
+    """Writes a single pb_plus.py file"""
 
-    def _write_line(self, line: str, *args: Any) -> None:
-        if args:
-            line = line.format(*args)
-        if line == "":
-            self.lines.append(line)
-        else:
-            self.lines.append(self.indent + line)
-
-    def _break_text(self, text_block: str) -> List[str]:
-        if text_block == "":
-            return []
-        return [
-            l[1:] if l.startswith(" ") else l for l in text_block.rstrip().split("\n")
-        ]
+    def __init__(
+            self,
+            fd: d.FileDescriptorProto,
+            descriptors: Descriptors,
+            readable_imports: bool = False,
+            package=None,
+    ) -> None:
+        super().__init__(fd, descriptors, readable_imports)
+        self.package = package
+        self.source_code_info_by_scl = {
+            tuple(location.path): location for location in fd.source_code_info.location
+        }
 
     def _has_comments(self, scl: SourceCodeLocation) -> bool:
         sci_loc = self.source_code_info_by_scl.get(tuple(scl))
@@ -309,14 +339,21 @@ class PkgWriter(object):
                 self._write_line("")  # Extra newline to separate
 
     def write_module_attributes(self) -> None:
+        l = self._write_line
         self.imports.add('proto')
-        self._write_line(f"__protobuf__ = proto")
-        self._write_line("")  # new line after imports
+        l(f"__protobuf__ = proto.module(")
+        with self._indent():
+            l(f'package="{self.package}",')
+            l("manifest={")
+            with self._indent():
+                for message in self.fd.message_type:
+                    l(f'"{message.name}",')
+            l("}")
+        l(")\n\n")
 
     def write_enums(
         self,
         enums: Iterable[d.EnumDescriptorProto],
-        prefix: str,
         scl_prefix: SourceCodeLocation,
     ) -> None:
         l = self._write_line
@@ -339,14 +376,11 @@ class PkgWriter(object):
     def write_messages(
         self,
         messages: Iterable[d.DescriptorProto],
-        prefix: str,
         scl_prefix: SourceCodeLocation,
     ) -> None:
         l = self._write_line
 
         for i, desc in enumerate(messages):
-            qualified_name = prefix + desc.name
-
             # Reproduce some hardcoded logic from the protobuf implementation - where
             # some specific "well_known_types" generated protos to have additional
             # base classes
@@ -372,12 +406,10 @@ class PkgWriter(object):
                 # Nested enums/messages
                 self.write_enums(
                     desc.enum_type,
-                    qualified_name + ".",
                     scl + [d.DescriptorProto.ENUM_TYPE_FIELD_NUMBER],
                 )
                 self.write_messages(
                     desc.nested_type,
-                    qualified_name + ".",
                     scl + [d.DescriptorProto.NESTED_TYPE_FIELD_NUMBER],
                 )
 
@@ -401,33 +433,7 @@ class PkgWriter(object):
                             l(f"{k}={v},")
                     l(")")
 
-                self.write_extensions(
-                    desc.extension, scl + [d.DescriptorProto.EXTENSION_FIELD_NUMBER]
-                )
-            l("")
-            l("")
-
-    def write_extensions(
-        self,
-        extensions: Sequence[d.FieldDescriptorProto],
-        scl_prefix: SourceCodeLocation,
-    ) -> None:
-        l = self._write_line
-        for i, ext in enumerate(extensions):
-            scl = scl_prefix + [i]
-
-            l(
-                "{}: {}[{}, {}] = ...",
-                ext.name,
-                self._import(
-                    "google.protobuf.internal.extension_dict",
-                    "_ExtensionFieldDescriptor",
-                ),
-                self._import_message(ext.extendee),
-                self.protoplus_type(ext),
-            )
-            self._write_comments(scl)
-            l("")
+            l("\n\n")
 
     def protoplus_type(
         self, field: d.FieldDescriptorProto
@@ -494,21 +500,7 @@ class PkgWriter(object):
                 # n,n to force a reexport (from x import y as y)
                 self.from_imports[reexport_imp].update((n, n) for n in names)
 
-        import_lines = []
-        for pkg in sorted(self.imports):
-            import_lines.append(f"import {pkg}")
-
-        for pkg, items in sorted(self.from_imports.items()):
-            import_lines.append(f"from {pkg} import (")
-            for (name, reexport_name) in sorted(items):
-                if reexport_name is None:
-                    import_lines.append(f"    {name},")
-                else:
-                    import_lines.append(f"    {name} as {reexport_name},")
-            import_lines.append(")\n")
-        import_lines.append("")
-
-        return "\n".join(import_lines + self.lines)
+        return super().write()
 
 
 def is_scalar(fd: d.FieldDescriptorProto) -> bool:
@@ -521,6 +513,7 @@ def is_scalar(fd: d.FieldDescriptorProto) -> bool:
 def generate_proto_plus(
     descriptors: Descriptors,
     response: plugin_pb2.CodeGeneratorResponse,
+    package: str,
     readable_imports: bool,
     quiet: bool,
 ) -> None:
@@ -528,21 +521,20 @@ def generate_proto_plus(
         pkg_writer = PkgWriter(
             fd,
             descriptors,
-            readable_imports=readable_imports
+            readable_imports=readable_imports,
+            package=package
         )
 
         pkg_writer.write_module_attributes()
         pkg_writer.write_enums(
-            fd.enum_type, "", [d.FileDescriptorProto.ENUM_TYPE_FIELD_NUMBER]
+            fd.enum_type, [d.FileDescriptorProto.ENUM_TYPE_FIELD_NUMBER]
         )
         pkg_writer.write_messages(
-            fd.message_type, "", [d.FileDescriptorProto.MESSAGE_TYPE_FIELD_NUMBER]
+            fd.message_type, [d.FileDescriptorProto.MESSAGE_TYPE_FIELD_NUMBER]
         )
-        pkg_writer.write_extensions(
-            fd.extension, [d.FileDescriptorProto.EXTENSION_FIELD_NUMBER]
-        )
+
         if fd.options.py_generic_services:
-            warn("GRPC compilation not implemented.")
+            sys.stderr.write("GRPC compilation not implemented.")
             sys.exit(1)
 
         assert name == fd.name
@@ -553,6 +545,56 @@ def generate_proto_plus(
         if not quiet:
             print("Writing protoplus to", output.name, file=sys.stderr)
 
+    # generate init files for packages
+    by_package = {k: list(v) for k, v in groupby(descriptors.to_generate.values(), key=lambda d: d.package)}
+
+    for pkg, modules in by_package.items():
+        output = response.file.add()
+        output.name = pkg.replace('-', '_').replace('.', '/') + "/__init__.py"
+
+        init_writer = InitWriter(descriptors, {pkg: modules}, readable_imports)
+        init_writer.write_module_attributes()
+        output.content = HEADER + init_writer.write()
+
+    root_dir = op.commonprefix([g.name for g in descriptors.to_generate.values()])
+    if not root_dir:
+        return
+
+    root_init = root_dir.replace('-', '_').replace('.', '/') + '/__init__.py'
+
+    if not any(o.name == root_init for o in response.file):
+        output = response.file.add()
+        output.name = root_init
+        root_writer = InitWriter(descriptors,
+                                 by_package,
+                                 readable_imports)
+        root_writer.write_module_attributes()
+        output.content = HEADER + root_writer.write()
+
+
+class InitWriter(Writer):
+
+    def __init__(self,
+                 descriptors: Descriptors,
+                 modules: dict[str, list[d.FileDescriptorProto]],
+                 readable_imports: bool = False,
+                 ) -> None:
+        self.modules = modules
+        super().__init__(d.FileDescriptorProto(), descriptors, readable_imports)
+
+    def write_module_attributes(self) -> None:
+        l = self._write_line
+
+        l("__all__ = (")
+        with self._indent():
+            for pkg, modules in self.modules.items():
+                for message in chain.from_iterable(m.message_type for m in modules):
+                    name = (
+                        message.name if message.name not in PYTHON_RESERVED else "_r_" + message.name
+                    )
+                    message = self._import_message(f".{pkg}.{name}")
+                    l(f'"{message}",')
+        l(")")
 
 
 @contextmanager
@@ -590,21 +632,31 @@ def code_generation() -> Iterator[
 def main() -> None:
     # Generate protoplus
     with code_generation() as (request, response):
-        out_redirect = Path('.dump_protoc_out')
-        if out_redirect.exists():
+        redirect = re.findall(r'save_request=(.+?,|.+$)', request.parameter)
+        package = re.findall(r'package=(.+?,|.+$)', request.parameter)
+
+        if len(redirect) > 1:
+            sys.stderr.write(f"Can't provide out= multiple times")
+            sys.exit(1)
+
+        if len(package) > 1:
+            sys.stderr.write(f"Can't provide package= multiple times")
+            sys.exit(1)
+
+        if redirect:
+            redirect = Path(redirect[0].strip(','))
             import google.protobuf.json_format
-            outfile = Path(out_redirect.read_text().strip())
-            with outfile.open('wb') as out:
+            with redirect.open('wb') as out:
                 out.write(request.SerializeToString(deterministic=True))
-            with (outfile.parent / f"{outfile.stem}.json").open('w') as json:
+            with (redirect.parent / f"{redirect.stem}.json").open('w') as json:
                 json.write(google.protobuf.json_format.MessageToJson(request))
-            sys.exit(0)
 
         generate_proto_plus(
             Descriptors(request),
             response,
-            "readable_imports" in request.parameter,
-            "quiet" in request.parameter,
+            readable_imports="readable_imports" in request.parameter,
+            quiet="quiet" in request.parameter,
+            package=package[0].strip(',') if package else None
         )
 
 
