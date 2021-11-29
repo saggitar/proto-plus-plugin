@@ -576,7 +576,7 @@ class InitWriter(Writer):
 
     def __init__(self,
                  descriptors: Descriptors,
-                 modules: dict[str, list[d.FileDescriptorProto]],
+                 modules: Dict[str, List[d.FileDescriptorProto]],
                  readable_imports: bool = False,
                  ) -> None:
         self.modules = modules
