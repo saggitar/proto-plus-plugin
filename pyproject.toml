@@ -7,3 +7,5 @@ requires = [
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools_scm]
+version_scheme = "post"
+local_version = "no-local-version"

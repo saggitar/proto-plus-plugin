@@ -2,8 +2,10 @@
 """Protoc Plugin to generate protoplus files. Loosely based on mypy's mypy-protobuf implementation"""
 import importlib.metadata
 import re
+import os
 import os.path as op
 import sys
+import warnings
 from abc import abstractmethod
 from collections import defaultdict
 from contextlib import contextmanager
@@ -90,6 +92,12 @@ PROTO_ENUM_RESERVED = {
     "values",
     "items",
 }
+
+def removeprefix(value: str, prefix=None):
+    if sys.version_info >= (3, 9):
+        return value.removeprefix(prefix or '')
+    else:
+        return value[len(prefix):] if value.startswith(prefix) else value
 
 
 def _mangle_global_identifier(name: str) -> str:
@@ -416,9 +424,13 @@ class PkgWriter(Writer):
                 for idx, field in enumerate(desc.field):
                     if field.name in PYTHON_RESERVED:
                         continue
+                    if field.number is None:
+                        warnings.warn(f"Field {field} has no number set in .proto file. "
+                                      f"It's the {idx + 1} field for {class_name}")
+
                     field_class, field_type = self.protoplus_type(field)
                     args = {
-                        'number': idx + 1,
+                        'number': field.number,
                     }
                     if field.HasField('oneof_index'):
                         args['oneof'] = f"'{desc.oneof_decl[field.oneof_index].name}'"
@@ -428,7 +440,7 @@ class PkgWriter(Writer):
                     # write field specification
                     l(f"{field.name} = {field_class}(")
                     with self._indent():
-                        l(f'{field_type.removeprefix(f"{class_name}.")},')
+                        l(f'{removeprefix(field_type, f"{class_name}.")},')
                         for k, v in args.items():
                             l(f"{k}={v},")
                     l(")")
@@ -437,7 +449,7 @@ class PkgWriter(Writer):
 
     def protoplus_type(
         self, field: d.FieldDescriptorProto
-    ) -> tuple:
+    ) -> Tuple[Any, str]:
         """
         Generate imports and return correct type
         """
