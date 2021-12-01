@@ -356,6 +356,8 @@ class PkgWriter(Writer):
             with self._indent():
                 for message in self.fd.message_type:
                     l(f'"{message.name}",')
+                for enum in self.fd.enum_type:
+                    l(f'"{enum.name}",')
             l("}")
         l(")\n\n")
 
@@ -379,6 +381,7 @@ class PkgWriter(Writer):
                     enumerate(enum.value),
                     scl + [d.EnumDescriptorProto.VALUE_FIELD_NUMBER],
                     )
+            l("")
             l("")
 
     def write_messages(
@@ -600,7 +603,8 @@ class InitWriter(Writer):
         l("__all__ = (")
         with self._indent():
             for pkg, modules in self.modules.items():
-                for message in chain.from_iterable(m.message_type for m in modules):
+                for message in chain(chain.from_iterable(m.enum_type for m in modules),
+                                     chain.from_iterable(m.message_type for m in modules)):
                     name = (
                         message.name if message.name not in PYTHON_RESERVED else "_r_" + message.name
                     )
