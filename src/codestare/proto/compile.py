@@ -2,7 +2,6 @@
 """Protoc Plugin to generate protoplus files. Loosely based on mypy's mypy-protobuf implementation"""
 import importlib.metadata
 import re
-import os
 import os.path as op
 import sys
 import warnings
@@ -27,6 +26,7 @@ import google.protobuf.descriptor_pb2 as d
 from google.protobuf.compiler import plugin_pb2 as plugin_pb2
 from google.protobuf.internal.containers import RepeatedCompositeFieldContainer
 from google.protobuf.internal.well_known_types import WKTBASES
+from google.protobuf.message import DecodeError
 
 __dist__ = 'codestare-proto-plus'
 try:
@@ -93,6 +93,7 @@ PROTO_ENUM_RESERVED = {
     "items",
 }
 
+
 def removeprefix(value: str, prefix=None):
     if sys.version_info >= (3, 9):
         return value.removeprefix(prefix or '')
@@ -123,18 +124,18 @@ class Descriptors(object):
         self.message_to_fd: Dict[str, d.FileDescriptorProto] = {}
 
         def _add_enums(
-            enums: "RepeatedCompositeFieldContainer[d.EnumDescriptorProto]",
-            prefix: str,
-            _fd: d.FileDescriptorProto,
+                enums: "RepeatedCompositeFieldContainer[d.EnumDescriptorProto]",
+                prefix: str,
+                _fd: d.FileDescriptorProto,
         ) -> None:
             for enum in enums:
                 self.message_to_fd[prefix + enum.name] = _fd
                 self.message_to_fd[prefix + enum.name + ".ValueType"] = _fd
 
         def _add_messages(
-            messages: "RepeatedCompositeFieldContainer[d.DescriptorProto]",
-            prefix: str,
-            _fd: d.FileDescriptorProto,
+                messages: "RepeatedCompositeFieldContainer[d.DescriptorProto]",
+                prefix: str,
+                _fd: d.FileDescriptorProto,
         ) -> None:
             for message in messages:
                 self.messages[prefix + message.name] = message
@@ -205,7 +206,8 @@ class Writer(object):
         ]
 
     @abstractmethod
-    def write_module_attributes(self) -> None: ...
+    def write_module_attributes(self) -> None:
+        ...
 
     def write(self) -> str:
         import_lines = []
@@ -232,7 +234,7 @@ class Writer(object):
         # Strip off package name
         if message_fd.package:
             assert name.startswith("." + message_fd.package + ".")
-            name = name[len("." + message_fd.package + ".") :]
+            name = name[len("." + message_fd.package + "."):]
         else:
             assert name.startswith(".")
             name = name[1:]
@@ -266,6 +268,15 @@ class Writer(object):
 
 class PkgWriter(Writer):
     """Writes a single pb_plus.py file"""
+
+    _current_working_class = None
+
+    @contextmanager
+    def working_class(self, value):
+        previous = self._current_working_class
+        self._current_working_class = value
+        yield self._current_working_class
+        self._current_working_class = previous
 
     def __init__(
             self,
@@ -331,9 +342,9 @@ class PkgWriter(Writer):
         return True
 
     def write_enum_values(
-        self,
-        values: Iterable[Tuple[int, d.EnumValueDescriptorProto]],
-        scl_prefix: SourceCodeLocation,
+            self,
+            values: Iterable[Tuple[int, d.EnumValueDescriptorProto]],
+            scl_prefix: SourceCodeLocation,
     ) -> None:
         for i, val in values:
             if val.name in PYTHON_RESERVED:
@@ -362,9 +373,9 @@ class PkgWriter(Writer):
         l(")\n\n")
 
     def write_enums(
-        self,
-        enums: Iterable[d.EnumDescriptorProto],
-        scl_prefix: SourceCodeLocation,
+            self,
+            enums: Iterable[d.EnumDescriptorProto],
+            scl_prefix: SourceCodeLocation,
     ) -> None:
         l = self._write_line
         for i, enum in enumerate(enums):
@@ -380,14 +391,14 @@ class PkgWriter(Writer):
                 self.write_enum_values(
                     enumerate(enum.value),
                     scl + [d.EnumDescriptorProto.VALUE_FIELD_NUMBER],
-                    )
+                )
             l("")
             l("")
 
     def write_messages(
-        self,
-        messages: Iterable[d.DescriptorProto],
-        scl_prefix: SourceCodeLocation,
+            self,
+            messages: Iterable[d.DescriptorProto],
+            scl_prefix: SourceCodeLocation,
     ) -> None:
         l = self._write_line
 
@@ -415,14 +426,15 @@ class PkgWriter(Writer):
                 self._write_comments(scl)
 
                 # Nested enums/messages
-                self.write_enums(
-                    desc.enum_type,
-                    scl + [d.DescriptorProto.ENUM_TYPE_FIELD_NUMBER],
-                )
-                self.write_messages(
-                    desc.nested_type,
-                    scl + [d.DescriptorProto.NESTED_TYPE_FIELD_NUMBER],
-                )
+                with self.working_class(desc):
+                    self.write_enums(
+                        desc.enum_type,
+                        scl + [d.DescriptorProto.ENUM_TYPE_FIELD_NUMBER],
+                    )
+                    self.write_messages(
+                        desc.nested_type,
+                        scl + [d.DescriptorProto.NESTED_TYPE_FIELD_NUMBER],
+                    )
 
                 for idx, field in enumerate(desc.field):
                     if field.name in PYTHON_RESERVED:
@@ -442,8 +454,12 @@ class PkgWriter(Writer):
 
                     # write field specification
                     l(f"{field.name} = {field_class}(")
+                    if self._current_working_class:
+                        field_type = removeprefix(field_type, f"{self._current_working_class.name}.")
+
+                    field_type = removeprefix(field_type, f"{class_name}.")
                     with self._indent():
-                        l(f'{removeprefix(field_type, f"{class_name}.")},')
+                        l(f'{field_type},')
                         for k, v in args.items():
                             l(f"{k}={v},")
                     l(")")
@@ -451,7 +467,7 @@ class PkgWriter(Writer):
             l("\n\n")
 
     def protoplus_type(
-        self, field: d.FieldDescriptorProto
+            self, field: d.FieldDescriptorProto
     ) -> Tuple[Any, str]:
         """
         Generate imports and return correct type
@@ -500,13 +516,13 @@ class PkgWriter(Writer):
             reexport_file = self.fd.dependency[reexport_idx]
             reexport_fd = self.descriptors.files[reexport_file]
             reexport_imp = (
-                reexport_file[:-6].replace("-", "_").replace("/", ".") + "_pb_plus"
+                    reexport_file[:-6].replace("-", "_").replace("/", ".") + "_pb_plus"
             )
             names = (
-                [m.name for m in reexport_fd.message_type]
-                + [m.name for m in reexport_fd.enum_type]
-                + [v.name for m in reexport_fd.enum_type for v in m.value]
-                + [m.name for m in reexport_fd.extension]
+                    [m.name for m in reexport_fd.message_type]
+                    + [m.name for m in reexport_fd.enum_type]
+                    + [v.name for m in reexport_fd.enum_type for v in m.value]
+                    + [m.name for m in reexport_fd.extension]
             )
             if reexport_fd.options.py_generic_services:
                 names.extend(m.name for m in reexport_fd.service)
@@ -520,17 +536,17 @@ class PkgWriter(Writer):
 
 def is_scalar(fd: d.FieldDescriptorProto) -> bool:
     return not (
-        fd.type == d.FieldDescriptorProto.TYPE_MESSAGE
-        or fd.type == d.FieldDescriptorProto.TYPE_GROUP
+            fd.type == d.FieldDescriptorProto.TYPE_MESSAGE
+            or fd.type == d.FieldDescriptorProto.TYPE_GROUP
     )
 
 
 def generate_proto_plus(
-    descriptors: Descriptors,
-    response: plugin_pb2.CodeGeneratorResponse,
-    package: str,
-    readable_imports: bool,
-    quiet: bool,
+        descriptors: Descriptors,
+        response: plugin_pb2.CodeGeneratorResponse,
+        package: str,
+        readable_imports: bool,
+        quiet: bool,
 ) -> None:
     for name, fd in descriptors.to_generate.items():
         pkg_writer = PkgWriter(
@@ -626,7 +642,16 @@ def code_generation() -> Iterator[
 
     # Parse request
     request = plugin_pb2.CodeGeneratorRequest()
-    request.ParseFromString(data)
+
+    # allow input as json for debug
+    try:
+        request.ParseFromString(data)
+    except DecodeError as e1:
+        from google.protobuf.json_format import Parse, ParseError
+        try:
+            Parse(data, request)
+        except ParseError as e2:
+            raise e2 from e1
 
     # Create response
     response = plugin_pb2.CodeGeneratorResponse()
