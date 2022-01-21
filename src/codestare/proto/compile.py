@@ -21,7 +21,12 @@ from typing import (
     Set,
     Tuple,
 )
-from importlib.metadata import version
+
+try:
+    from importlib.metadata import version
+except ImportError: # for Python<3.8
+    from importlib_metadata import version
+
 import google.protobuf.descriptor_pb2 as d
 from google.protobuf.compiler import plugin_pb2 as plugin_pb2
 from google.protobuf.internal.containers import RepeatedCompositeFieldContainer
