@@ -8,10 +8,8 @@ import functools
 import os.path as op
 import pathlib
 import re
-import sys
 import warnings
 from abc import abstractmethod
-from itertools import groupby, chain
 from typing import (
     Any,
     Callable,
@@ -23,6 +21,10 @@ from typing import (
     Set,
     Tuple,
 )
+
+import itertools
+import sys
+from itertools import groupby, chain
 
 try:
     import importlib.metadata as importlib_metadata
@@ -353,80 +355,110 @@ class PkgWriter(Writer):
             tuple(location.path): location for location in fd.source_code_info.location
         }
 
-    def _generate_docstring_comment_(self, descriptor, body, class_comment, field_comments):
-        attrs_template = "{name} ({container}): :obj:`~{container}` of type :obj:`~{content}`"
-        docstring_template = "Generated from {file}\n\nAttributes:"
-        names = [field.name for field in descriptor.field]
+    def _fix_meta_import(self, import_name, mapping: Dict[str, str]):
+        """
+        Some packages are not imported from the module where they are actually defined.
+        (e.g. 'proto.Field')
+        """
+        for meta_module, defining_module in mapping.items():
+            if import_name.startswith(meta_module) and not import_name.startswith(defining_module):
+                import_name = defining_module + import_name[len(meta_module):]
+                break
 
-        def get_import_name(full_spec):
-            specs = full_spec.rsplit('.', maxsplit=1)
-            module, name = (None, specs[0]) if len(specs) == 1 else specs
+        return import_name
 
-            imports = [
-                f"{imp}.{name}" for imp, alias in self.imports
-                if (alias and alias == name) or imp == module
-            ]
+    def _get_doc_import_name(self, full_spec):
+        specs = full_spec.rsplit('.', maxsplit=1)
+        module, name = (None, specs[0]) if len(specs) == 1 else specs
 
-            imports = imports or [
-                f"{imp}.{name}" for imp, imports in self.from_imports.items()
-                if any((alias and alias == name) or imp_name == name for imp_name, alias in imports)
-            ]
+        imports = [
+            f"{imp}.{name}" for imp, alias in self.imports
+            if (alias and alias == name) or imp == module
+        ]
 
-            if not imports:
-                # Name is defined in same module
-                return f".{name}"
+        imports = imports or [
+            f"{imp}.{name}" for imp, imports in self.from_imports.items()
+            if any((alias and alias == name) or imp_name == name for imp_name, alias in imports)
+        ]
 
-            assert len(imports) == 1, f"{len(imports)} imports define {full_spec}"
+        if not imports:
+            # Name is defined in same module
+            return f".{name}"
 
-            return imports[0]
+        assert len(imports) == 1, f"{len(imports)} imports define {full_spec}"
 
-        def extract_info(name, container, args):
-            if name not in names:
-                return None, None
+        return imports[0]
 
-            container = get_import_name(container)
-            meta_import = 'proto.'
-            container_module = 'proto.fields.'  # actual import location
+    def _generate_docstring_comment_(self, header: List, field_infos: Dict, label_prefix):
+        def _get_insert_pos(value):
+            return [index + 1 for index, line in enumerate(comment) if re.match(r'^\s*{}$'.format(value), line)]
 
-            if container.startswith(meta_import) and not container.startswith(container_module):
-                container = container_module + container[len(meta_import):]
+        info_comment_template = "{name} ({field_class}): :obj:`~{field_class}` of type :obj:`~{field_type}`"
+        wl = functools.partial(self._write_line, dry_run=True, break_line=True)
+        label_prefix = label_prefix[1:].lower()
 
-            message_type = self.info_matcher.match(args)[1]
+        top_level = header
+        oneof_header = ".. admonition:: One Ofs"
+        attributes_header = 'Attributes:'
 
-            return name, attrs_template.format(
-                name=name,
-                container=container,
-                content=get_import_name(message_type)
-            )
+        if any('oneof' in argmap for argmap in field_infos.values()):
+            for has_oneof in [argmap for argmap in field_infos.values() if 'oneof' in argmap]:
+                has_oneof['oneof'] = has_oneof['oneof'].strip("'")
 
-        header = class_comment + docstring_template.format(file=self.fd.name).split('\n')
-        lines = self._write_comments(header, dry_run=True)
+            header += [oneof_header] if not header[-1] else ['', oneof_header]
 
-        extracted = {
-            name: info for name, info in
-            map(lambda v: extract_info(*v), self.field_matcher.findall(body))
-            if info is not None
-        }
+        if field_infos:
+            header += [attributes_header] if not header[-1] else ['', attributes_header]
+
+        comment = self._write_comments(top_level, dry_run=True, break_line=True)
 
         with self._indent():
-            comment_body = []
+            insert_attr = _get_insert_pos(attributes_header)
+            if insert_attr:
+                body = []
+                for name, argmap in field_infos.items():
+                    template = info_comment_template
+                    if 'oneof' in argmap:
+                        template += " -- *oneof* :attr:`.{oneof}`"
+                    if 'optional' in argmap:
+                        template += ' -- *optional*'
 
-            for name, info in extracted.items():
-                info_lines = self._write_line(info, dry_run=True, break_line=True)
-                comment_body.extend(info_lines)
-                with self._indent():
-                    field_comment = field_comments.get(name)
-                    if field_comment:
-                        additional_info = [''] + field_comment + ['']
-                    else:
-                        additional_info = ['']
+                    lines = [
+                                template.format(name=name, label_prefix=label_prefix, **argmap),
+                            ] + argmap.get('comment') or []
 
-                    for line in additional_info:
-                        comment_body.extend(self._write_line(line, dry_run=True, break_line=True))
+                    formatted = [
+                        l_ for line in lines
+                        for l_ in wl(line)
+                    ]
+                    body.extend(formatted)
 
-            lines[:] = lines[:-2] + comment_body + lines[-2:]
+                for pos in insert_attr:
+                    comment = comment[:pos] + body + comment[pos:]
 
-        return lines
+            insert_oneof = _get_insert_pos(oneof_header)
+            if insert_oneof:
+                oneofs = set(filter(None, (argmap.get('oneof') for argmap in field_infos.values())))
+                oneof_mapping = {
+                    oneof: [name for name, argmap in field_infos.items() if argmap.get('oneof') == oneof]
+                    for oneof in oneofs
+                }
+                body = [''] + wl(f"This message defines the following *oneof* group[s]") + ['']
+
+                for name, fields in oneof_mapping.items():
+                    body += wl(f".. attribute:: {name}")
+                    with self._indent():
+                        body += ['']
+                        body.extend(
+                            itertools.chain.from_iterable(
+                                wl(line) for line in map('- \t:attr:`.{}`'.format, fields)
+                            )
+                        )
+
+                for pos in insert_oneof:
+                    comment = comment[:pos] + body + comment[pos:]
+
+        return comment
 
     def _has_comments(self, scl: SourceCodeLocation) -> bool:
         sci_loc = self.source_code_info_by_scl.get(tuple(scl))
@@ -584,7 +616,7 @@ class PkgWriter(Writer):
                         scl + [d.DescriptorProto.NESTED_TYPE_FIELD_NUMBER],
                     )
 
-                field_comments = {}
+                field_infos = {}
 
                 for idx, field in enumerate(desc.field):
                     if field.name in PYTHON_RESERVED:
@@ -615,15 +647,25 @@ class PkgWriter(Writer):
                     l(")")
 
                     field_scl = scl + [d.DescriptorProto.FIELD_FIELD_NUMBER, idx]
-                    field_comments[field.name] = self._get_comments(field_scl)
+                    gi = self._get_doc_import_name
+
+                    field_infos[field.name] = {
+                        **args,
+                        'comment': self._get_comments(field_scl),
+                        'field_type': self._fix_meta_import(gi(field_type),
+                                                            mapping={
+                                                                'proto.': 'proto.primitives.ProtoType.'
+                                                            }),
+                        'field_class': self._fix_meta_import(gi(field_class),
+                                                             mapping={'proto.': 'proto.fields.'}
+                                                             ),
+                    }
 
                 docstring = self._generate_docstring_comment_(
-                    desc,
-                    body='\n'.join(self.lines[_line_count:]),
-                    class_comment=class_comment,
-                    field_comments=field_comments,
+                    header=class_comment or [''],
+                    field_infos=field_infos,
+                    label_prefix=self._get_doc_import_name(class_name)
                 )
-
                 self.lines = self.lines[:_line_count] + docstring + self.lines[_line_count:]
 
             l("\n")
