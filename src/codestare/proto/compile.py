@@ -20,6 +20,7 @@ from typing import (
     Optional,
     Set,
     Tuple,
+    Literal,
 )
 
 import itertools
@@ -125,7 +126,7 @@ PARAMETER_KEYWORD_ARGS = [
     'package',
 ]
 
-MAX_LINE_LEN = 80
+MAX_LINE_LEN = 100
 
 
 # def is_scalar(fd: d.FieldDescriptorProto) -> bool:
@@ -225,13 +226,35 @@ class Writer(object):
         yield
         self.indent = self.indent[:-4]
 
-    def _write_line(self, line: str, *args: Any, break_line=False, dry_run=False) -> List[str]:
+    def _write_line(self,
+                    line: str,
+                    *args: Any,
+                    break_line: str | Literal['indent'] | Literal['no-indent'] = None,
+                    dry_run: bool = False) -> List[str]:
+        """
+        Generate formatted version of line (and possibly append to internal line buffer)
+
+        Args:
+            line: content or format string
+            *args: if present, line is considered a format string and *args are passed for formatting
+            break_line: None or 'indent', 'no-indent' - breaks long lines and indents following
+                line if 'indent', breaks without indentation if 'no-indent'
+            dry_run: don't append to internal buffer if True
+
+        Returns:
+            generated lines
+
+        """
         if args:
             line = line.format(*args)
 
+        allowed_indent_values =  [None, 'indent', 'no-indent']
+        if break_line not in allowed_indent_values:
+            raise ValueError(f"{break_line} passed for argument break_line, allowed: {'/'.join(allowed_indent_values)}")
+
         lines = [] if break_line else [line]
         if not lines:
-            indent = '    '
+            indent = '    ' if break_line == 'indent' else ''
             remainder = self.indent + line
 
             while len(remainder) > MAX_LINE_LEN:
@@ -394,7 +417,7 @@ class PkgWriter(Writer):
             return [index + 1 for index, line in enumerate(comment) if re.match(r'^\s*{}$'.format(value), line)]
 
         info_comment_template = "{name} ({field_class}): :obj:`~{field_class}` of type :obj:`~{field_type}`"
-        wl = functools.partial(self._write_line, dry_run=True, break_line=True)
+        wl = functools.partial(self._write_line, dry_run=True, break_line='indent')
         label_prefix = label_prefix[1:].lower()
 
         top_level = header
@@ -410,7 +433,7 @@ class PkgWriter(Writer):
         if field_infos:
             header += [attributes_header] if not header[-1] else ['', attributes_header]
 
-        comment = self._write_comments(top_level, dry_run=True, break_line=True)
+        comment = self._write_comments(top_level, dry_run=True, break_line='no-indent')
 
         with self._indent():
             insert_attr = _get_insert_pos(attributes_header)
@@ -662,7 +685,7 @@ class PkgWriter(Writer):
                     }
 
                 docstring = self._generate_docstring_comment_(
-                    header=class_comment or [''],
+                    header=[''] + class_comment,
                     field_infos=field_infos,
                     label_prefix=self._get_doc_import_name(class_name)
                 )
