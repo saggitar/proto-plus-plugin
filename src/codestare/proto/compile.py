@@ -767,14 +767,14 @@ def generate_proto_plus(
         **kwargs
 ) -> None:
     generate_inits = kwargs.pop('generate_inits', False)
-    readable_imports = kwargs.pop('readable_imports', False)
+    readable_imports = kwargs.get('readable_imports', False)
     quiet = kwargs.pop('quiet', False)
 
     if generate_inits and not readable_imports:
         warnings.warn(f"Generating proto plus code with 'from ... import ...' statements, to unwrap circular import"
                       f" loops when importing names in __init__.py files since 'generate_inits' was supplied.")
 
-        kwargs['readable_imports'] = True
+        kwargs['readable_imports'] = readable_imports
 
     for name, fd in descriptors.to_generate.items():
         pkg_writer = PkgWriter(fd=fd, descriptors=descriptors, **kwargs)
@@ -801,8 +801,7 @@ def generate_proto_plus(
     if not generate_inits:
         return
 
-    # imports need "readable imports" setting
-    kwargs['readable_imports'] = True
+    assert kwargs['readable_imports'], 'imports need "readable imports" setting'
     root_package = kwargs.pop('package', None)
 
     # generate init files for packages
