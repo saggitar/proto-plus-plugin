@@ -248,7 +248,7 @@ class Writer(object):
         if args:
             line = line.format(*args)
 
-        allowed_indent_values =  [None, 'indent', 'no-indent']
+        allowed_indent_values = [None, 'indent', 'no-indent']
         if break_line not in allowed_indent_values:
             raise ValueError(f"{break_line} passed for argument break_line, allowed: {'/'.join(allowed_indent_values)}")
 
@@ -852,17 +852,17 @@ class InitWriter(Writer):
 
     def write_module_attributes(self) -> None:
         l = self._write_line
+        imported = []
+        for pkg, modules in self.modules.items():
+            for message in chain(chain.from_iterable(m.enum_type for m in modules),
+                                 chain.from_iterable(m.message_type for m in modules)):
+                name = message.name if message.name not in PYTHON_RESERVED else "_r_" + message.name
+                imported.append(self._import_message(f".{pkg}.{name}"))
 
         l("__all__ = (")
         with self._indent():
-            for pkg, modules in self.modules.items():
-                for message in chain(chain.from_iterable(m.enum_type for m in modules),
-                                     chain.from_iterable(m.message_type for m in modules)):
-                    name = (
-                        message.name if message.name not in PYTHON_RESERVED else "_r_" + message.name
-                    )
-                    message = self._import_message(f".{pkg}.{name}")
-                    l(f'"{message}",')
+            for name in sorted(imported):
+                l(f'"{name}",')
         l(")")
 
     def write(self) -> str:
