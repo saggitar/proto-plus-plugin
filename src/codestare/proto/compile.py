@@ -562,7 +562,8 @@ class PkgWriter(Writer):
 
         l(f"__protobuf__ = {module}(")
         with self._indent():
-            l(f'package="{self.package}",')
+            l(f'package="{self.fd.package}",')
+            l(f'marshal="{self.package}",')
             l("manifest={")
             with self._indent():
                 for message in self.fd.message_type:
