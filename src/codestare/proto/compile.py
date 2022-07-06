@@ -118,6 +118,7 @@ PARAMETER_FLAGS = [
     'readable_imports',
     'relative_imports',
     'generate_inits',
+    'generic_field_hints',
     'quiet',
 ]
 
@@ -187,6 +188,7 @@ class Writer(object):
             descriptors: Descriptors,
             readable_imports: bool = False,
             relative_imports: bool = False,
+            generic_field_hints: bool = False,
             package: str | None = None,
     ) -> None:
         self.fd = fd
@@ -194,6 +196,7 @@ class Writer(object):
         self.package = package
         self.readable_imports = readable_imports
         self.relative_imports = relative_imports
+        self.generic_field_hints = generic_field_hints
 
         self.lines: List[str] = []
         self.indent = ""
@@ -649,24 +652,19 @@ class PkgWriter(Writer):
                         warnings.warn(f"Field {field} has no number set in .proto file. "
                                       f"It's the {idx + 1} field for {class_name}")
 
-                    field_class, field_type = self.protoplus_type(field)
-                    args = {
-                        'number': field.number,
-                    }
-                    if field.HasField('oneof_index'):
-                        args['oneof'] = f"'{desc.oneof_decl[field.oneof_index].name}'"
-                    else:
-                        args['optional']: field.label == field.LABEL_OPTIONAL
+                    with self.working_class(desc):
+                        field_class, pos_args, kwargs = self.protoplus_field(field, desc)
 
-                    # write field specification
-                    l(f"{field.name} = {field_class}(")
-                    if self._current_working_class:
-                        field_type = removeprefix(field_type, f"{self._current_working_class.name}.")
+                        # write field specification
+                        if self.generic_field_hints:
+                            l(f"{field.name}: {self.get_generic_hint_type(field)} = {field_class}(")
+                        else:
+                            l(f"{field.name} = {field_class}(")
 
-                    field_type = removeprefix(field_type, f"{class_name}.")
                     with self._indent():
-                        l(f'{field_type},')
-                        for k, v in args.items():
+                        for arg in pos_args:
+                            l(f'{arg},')
+                        for k, v in kwargs.items():
                             l(f"{k}={v},")
                     l(")")
 
@@ -674,9 +672,9 @@ class PkgWriter(Writer):
                     gi = self._get_doc_import_name
 
                     field_infos[field.name] = {
-                        **args,
+                        **kwargs,
                         'comment': self._get_comments(field_scl),
-                        'field_type': self._fix_meta_import(gi(field_type),
+                        'field_type': self._fix_meta_import(gi(kwargs.get('message') or kwargs.get('enum') or pos_args[0]),
                                                             mapping={
                                                                 'proto.': 'proto.primitives.ProtoType.'
                                                             }),
@@ -694,11 +692,49 @@ class PkgWriter(Writer):
 
             l("\n")
 
-    def protoplus_type(
-            self, field: d.FieldDescriptorProto
-    ) -> Tuple[Any, str]:
+    def get_generic_hint_type(self, field):
+        mapping: Dict[d.FieldDescriptorProto.Type.V, Callable[[], str]] = {
+            d.FieldDescriptorProto.TYPE_DOUBLE: lambda: self._builtin("float"),
+            d.FieldDescriptorProto.TYPE_FLOAT: lambda: self._builtin("float"),
+            d.FieldDescriptorProto.TYPE_INT64: lambda: self._builtin("int"),
+            d.FieldDescriptorProto.TYPE_UINT64: lambda: self._builtin("int"),
+            d.FieldDescriptorProto.TYPE_FIXED64: lambda: self._builtin("int"),
+            d.FieldDescriptorProto.TYPE_SFIXED64: lambda: self._builtin("int"),
+            d.FieldDescriptorProto.TYPE_SINT64: lambda: self._builtin("int"),
+            d.FieldDescriptorProto.TYPE_INT32: lambda: self._builtin("int"),
+            d.FieldDescriptorProto.TYPE_UINT32: lambda: self._builtin("int"),
+            d.FieldDescriptorProto.TYPE_FIXED32: lambda: self._builtin("int"),
+            d.FieldDescriptorProto.TYPE_SFIXED32: lambda: self._builtin("int"),
+            d.FieldDescriptorProto.TYPE_SINT32: lambda: self._builtin("int"),
+            d.FieldDescriptorProto.TYPE_BOOL: lambda: self._builtin("bool"),
+            d.FieldDescriptorProto.TYPE_STRING: lambda: self._builtin("str"),
+            d.FieldDescriptorProto.TYPE_BYTES: lambda: self._builtin("bytes"),
+            d.FieldDescriptorProto.TYPE_ENUM: lambda: self._get_cleaned_field_type(field),
+            d.FieldDescriptorProto.TYPE_MESSAGE: lambda: self._get_cleaned_field_type(field),
+        }
+
+        assert field.type in mapping, "Unrecognized / Unsupported type: " + repr(field.type)
+        field_type = mapping[field.type]()
+
+        if field.label != d.FieldDescriptorProto.LABEL_REPEATED:
+            hint = field_type
+        else:
+            # else use MapField or RepeatedField
+            msg = self.descriptors.messages.get(field.type_name)
+            if msg is not None and msg.options.map_entry:
+                value_type = self._get_cleaned_field_type(msg.field[1])
+                hint = f"{self._import('typing', 'MutableMap')}[{field_type},{value_type}]"
+            else:
+                hint = f"{self._import('typing', 'Iterable')}[{field_type}]"
+
+        return hint
+
+
+    def protoplus_field(
+            self, field: d.FieldDescriptorProto, desc: d.DescriptorProto
+    ) -> Tuple[str, Tuple[str, ...], dict]:
         """
-        Generate imports and return correct type
+        Generate imports and return field specs
         """
 
         mapping: Dict[d.FieldDescriptorProto.Type.V, Callable[[], str]] = {
@@ -717,27 +753,49 @@ class PkgWriter(Writer):
             d.FieldDescriptorProto.TYPE_BOOL: lambda: self._import('proto', 'BOOL'),
             d.FieldDescriptorProto.TYPE_STRING: lambda: self._import('proto', 'STRING'),
             d.FieldDescriptorProto.TYPE_BYTES: lambda: self._import('proto', 'BYTES'),
-            d.FieldDescriptorProto.TYPE_ENUM: lambda: self._import_message(field.type_name),
-            d.FieldDescriptorProto.TYPE_MESSAGE: lambda: self._import_message(field.type_name),
-            d.FieldDescriptorProto.TYPE_GROUP: lambda: self._import_message(field.type_name),
+            d.FieldDescriptorProto.TYPE_ENUM: lambda: self._import('proto', 'ENUM'),
+            d.FieldDescriptorProto.TYPE_MESSAGE: lambda: self._import('proto', 'MESSAGE'),
         }
 
-        assert field.type in mapping, "Unrecognized type: " + repr(field.type)
-        field_type = mapping[field.type]()
+        assert field.type in mapping, "Unrecognized / Unsupported type: " + repr(field.type)
+
+        args = mapping[field.type](),
+        kwargs = {'number': field.number}
 
         # For non-repeated fields, use normal Field!
         if field.label != d.FieldDescriptorProto.LABEL_REPEATED:
-            field_class = self._import('proto', 'Field')
+            kls = self._import('proto', 'Field')
         else:
             # else use MapField or RepeatedField
             msg = self.descriptors.messages.get(field.type_name)
-            field_class = (
-                self._import('proto', 'MapField')
-                if msg is not None and msg.options.map_entry else
-                self._import('proto', 'RepeatedField')
-            )
+            if msg is not None and msg.options.map_entry:
+                kls = self._import('proto', 'MapField')
+                value_type = self._get_cleaned_field_type(msg.field[1])
+                kwargs['message'] = value_type
+                args += value_type,
+            else:
+                kls = self._import('proto', 'RepeatedField')
 
-        return field_class, field_type
+        if field.type == d.FieldDescriptorProto.TYPE_ENUM:
+            kwargs['enum'] = self._get_cleaned_field_type(field)
+
+        if field.type == d.FieldDescriptorProto.TYPE_MESSAGE:
+            kwargs['message'] = self._get_cleaned_field_type(field)
+
+        if field.HasField('oneof_index'):
+            kwargs['oneof'] = f"'{desc.oneof_decl[field.oneof_index].name}'"
+        else:
+            kwargs['optional']: field.label == field.LABEL_OPTIONAL
+
+        return kls, args, kwargs
+
+    def _get_cleaned_field_type(self, field):
+        field_type = self._import_message(field.type_name)
+
+        if self._current_working_class:
+            field_type = removeprefix(field_type, f"{self._current_working_class.name}.")
+
+        return field_type
 
     def write(self) -> str:
         for reexport_idx in self.fd.public_dependency:
