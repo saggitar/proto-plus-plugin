@@ -732,7 +732,7 @@ class PkgWriter(Writer):
                 value_type = self._get_cleaned_field_type(msg.field[1])
                 hint = f"{self._import('typing', 'MutableMap')}[{field_type},{value_type}]"
             else:
-                hint = f"{self._import('typing', 'Iterable')}[{field_type}]"
+                hint = f"{self._import('typing', 'Sequence')}[{field_type}]"
 
         return hint
 
