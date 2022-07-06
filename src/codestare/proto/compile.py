@@ -38,6 +38,11 @@ from google.protobuf.internal.containers import RepeatedCompositeFieldContainer
 from google.protobuf.internal.well_known_types import WKTBASES
 from google.protobuf.message import DecodeError
 
+import logging
+logging.basicConfig(filename='compile.log', encoding='utf-8', level=logging.DEBUG, filemode='w')
+log = logging.getLogger(__name__)
+
+
 __dist__ = 'codestare-proto-plus'
 try:
     __version__ = importlib_metadata.version(__dist__)
@@ -369,11 +374,13 @@ class PkgWriter(Writer):
     info_matcher = re.compile(r'\s*([^\s]+),\s+.*', re.DOTALL)
 
     @contextlib.contextmanager
-    def working_class(self, value):
+    def working_class(self, value: d.DescriptorProto):
         previous = self._current_working_class
-        self._current_working_class = value
-        yield self._current_working_class
+        self._current_working_class = '.'.join(filter(None, (previous, value.name)))
+        log.debug(f"Change class {previous} -> {self._current_working_class}")
+        yield
         self._current_working_class = previous
+        log.debug(f"Change class {self._current_working_class} -> {previous}")
 
     def __init__(self, *, fd: d.FileDescriptorProto, **kwargs) -> None:
         super().__init__(fd=fd, **kwargs)
@@ -793,7 +800,7 @@ class PkgWriter(Writer):
         field_type = self._import_message(field.type_name)
 
         if self._current_working_class:
-            field_type = removeprefix(field_type, f"{self._current_working_class.name}.")
+            field_type = removeprefix(field_type, f"{self._current_working_class}.")
 
         return field_type
 
