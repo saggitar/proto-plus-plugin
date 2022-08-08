@@ -41,7 +41,7 @@
     "ubii/proto/v1/dataStructure/pose3d.proto",
     "ubii/proto/v1/dataStructure/touchEvent.proto"
   ],
-  "parameter": "generate_inits,relative_imports,package=ubii.proto.v1",
+  "parameter": "readable_imports,generate_inits,generate_field_hints,relative_imports,package=ubii.proto.v1",
   "compilerVersion": {
     "major": 3,
     "minor": 19,
