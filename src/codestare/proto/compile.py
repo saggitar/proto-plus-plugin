@@ -563,8 +563,11 @@ class PkgWriter(Writer):
             self._write_line(
                 f"{val.name} = {val.number}",
             )
-            if self._write_comments(self._get_comments(scl)):
-                self._write_line("")  # Extra newline to separate
+
+            # use empty docstring with type hints to force attribute doc in sphinx
+            self._write_comments(
+                self._get_comments(scl) or ([""] if self.generic_field_hints else None)
+            )
 
     def write_module_attributes(self) -> None:
         l = self._write_line
@@ -603,7 +606,6 @@ class PkgWriter(Writer):
                     enumerate(enum.value),
                     scl + [d.EnumDescriptorProto.VALUE_FIELD_NUMBER],
                 )
-            l("")
 
     def write_messages(
             self,
